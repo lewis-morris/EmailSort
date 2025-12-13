@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "contact_email": {
+      "type": "string"
+    },
+    "tone_summary": {
+      "type": "string"
+    },
+    "style_guidelines": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "contact_email",
+    "tone_summary",
+    "style_guidelines"
+  ],
+  "additionalProperties": false
+}

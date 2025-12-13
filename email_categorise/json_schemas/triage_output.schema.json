@@ -1,0 +1,91 @@
+{
+  "type": "object",
+  "properties": {
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "primary_category": {
+            "type": "string"
+          },
+          "secondary_categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "flag": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "needs_reply": {
+            "type": "boolean"
+          },
+          "is_marketing": {
+            "type": "boolean"
+          },
+          "is_informational": {
+            "type": "boolean"
+          },
+          "mark_complete": {
+            "type": "boolean"
+          },
+          "mark_possibly_complete": {
+            "type": "boolean"
+          },
+          "pin": {
+            "type": "boolean"
+          },
+          "create_task": {
+            "type": "boolean"
+          },
+          "task_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "draft_reply_body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "primary_category",
+          "secondary_categories",
+          "flag",
+          "needs_reply",
+          "is_marketing",
+          "is_informational",
+          "mark_complete",
+          "mark_possibly_complete",
+          "pin",
+          "create_task",
+          "task_summary",
+          "summary",
+          "draft_reply_body"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "messages"
+  ],
+  "additionalProperties": false
+}

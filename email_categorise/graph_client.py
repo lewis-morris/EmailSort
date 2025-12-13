@@ -76,6 +76,12 @@ class GraphClient:
             resp.raise_for_status()
         return resp.json() if resp.text else {}
 
+    def _delete(self, url: str) -> None:
+        resp = self.session.delete(url)
+        if not resp.ok:
+            logger.error("Graph DELETE %s failed: %s", resp.url, resp.text)
+            resp.raise_for_status()
+
     def list_inbox_unprocessed_messages(self, days_back: int, max_messages: int = 100) -> List[Dict[str, Any]]:
         since = utc_now() - timedelta(days=days_back)
         since_str = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -169,6 +175,9 @@ class GraphClient:
             return None
         self._patch(f"{self._user_root}/messages/{draft_id}", {"body": {"contentType": "HTML", "content": reply_body_html}})
         return draft_id
+
+    def delete_message(self, message_id: str) -> None:
+        self._delete(f"{self._user_root}/messages/{message_id}")
 
     def send_mail(self, subject: str, html_body: str, to_address: str, save_to_sent: bool = True) -> None:
         body = {

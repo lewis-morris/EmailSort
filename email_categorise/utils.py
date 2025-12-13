@@ -54,6 +54,13 @@ def account_state_dir(base_dir: Path, account_email: str) -> Path:
     return ensure_dir(base_dir / safe)
 
 
+def run_ledger_dir(base_dir: Path) -> Path:
+    """
+    Location for run-level audit/rollback logs.
+    """
+    return ensure_dir(base_dir)
+
+
 _ENV_LOADED = False
 
 

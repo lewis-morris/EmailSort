@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,11 +12,12 @@ from .auth import (
     acquire_delegated_token,
     build_confidential_client,
     build_public_client,
+    record_login_event,
 )
 from .codex_runner import CodexRunner
 from .config import AppConfig, AccountConfig
 from .graph_client import GraphClient
-from .utils import account_state_dir, load_json, save_json, utc_now
+from .utils import account_state_dir, load_json, save_json, utc_now, run_ledger_dir
 
 logger = logging.getLogger("email_categorise.logic")
 
@@ -229,8 +231,9 @@ def _apply_triage_to_message(
     triage: Dict[str, Any],
     draft_replies: bool,
     create_tasks: bool,
+    priority_read_state: Dict[str, bool],
     graph: GraphClient,
-) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
     existing_categories: List[str] = list(original.get("categories") or [])
     categories = set(existing_categories)
     categories.add("Processed")
@@ -260,12 +263,20 @@ def _apply_triage_to_message(
     mark_complete = bool(triage.get("mark_complete"))
     create_task = bool(triage.get("create_task")) if create_tasks else False
 
-    if mark_complete or is_marketing:
-        is_read = True
-    elif is_informational:
-        is_read = False
-    else:
-        is_read = False  # keep unread by default, conservative
+    def _decide_read() -> bool:
+        if primary_category in priority_read_state:
+            return priority_read_state[primary_category]
+        if mark_complete and "Complete" in priority_read_state:
+            return priority_read_state["Complete"]
+        if triage.get("mark_possibly_complete") and "Possibly Complete" in priority_read_state:
+            return priority_read_state["Possibly Complete"]
+        if is_marketing and "Marketing" in priority_read_state:
+            return priority_read_state["Marketing"]
+        if is_informational and "Informational" in priority_read_state:
+            return priority_read_state["Informational"]
+        return priority_read_state.get("default", False)
+
+    is_read = _decide_read()
 
     patch_body: Dict[str, Any] = {
         "categories": sorted(categories),
@@ -300,12 +311,18 @@ def _apply_triage_to_message(
         html = "<p>" + "<br>".join(str(triage["draft_reply_body"]).splitlines()) + "</p>"
         draft_id = graph.create_draft_reply(original["id"], html)
 
-    return patch_body, info_entry, task_entry, draft_id
+    before_state = {
+        "categories": existing_categories,
+        "isRead": original.get("isRead"),
+        "flag": original.get("flag"),
+    }
+
+    return patch_body, info_entry, task_entry, draft_id, before_state
 
 
-def _write_tasks_file(account_dir: Path, tasks: List[Dict[str, Any]]) -> None:
+def _write_tasks_file(account_dir: Path, tasks: List[Dict[str, Any]]) -> Path:
     if not tasks:
-        return
+        return account_dir / "tasks.md"
     path = account_dir / "tasks.md"
     with path.open("a", encoding="utf-8") as f:
         f.write(f"\n## Run {utc_now().isoformat()}\n")
@@ -317,6 +334,7 @@ def _write_tasks_file(account_dir: Path, tasks: List[Dict[str, Any]]) -> None:
                 f.write(f"- [{subject}]({link}) - {summary}\n")
             else:
                 f.write(f"- {subject} - {summary}\n")
+    return path
 
 
 def _write_log_file(account_dir: Path, messages: List[Dict[str, Any]], triage_map: Dict[str, Dict[str, Any]]) -> None:
@@ -343,31 +361,144 @@ def _summary_email_html(infos: List[Dict[str, Any]], account_email: str) -> str:
     return f"<p>Informational email summary for <strong>{account_email}</strong>.</p><ul>{''.join(rows)}</ul>"
 
 
-def _get_graph(config: AppConfig, account: AccountConfig) -> GraphClient:
-    tenant_id = account.tenant_id or config.azure.tenant_id
+def _get_graph(config: AppConfig, account: AccountConfig, run_id: Optional[str] = None) -> GraphClient:
+    azure = config.azure_for_account(account)
+    tenant_id = azure.tenant_id
     cache_path = Path(config.auth.token_cache_path)
     if config.auth.auth_mode == "delegated":
-        app = build_public_client(config.azure, cache_path, tenant_id=tenant_id)
-        token = acquire_delegated_token(app, config.azure.delegated_scopes, account.email)
+        app = build_public_client(azure, cache_path, tenant_id=tenant_id)
+        token = acquire_delegated_token(app, azure.delegated_scopes, account.email)
         if not token:
             raise RuntimeError(f"Delegated auth failed for {account.email}")
+        record_login_event(config.repo_root, account.email, "delegated", tenant_id, run_id)
         return GraphClient(token["access_token"], user="me")
     if config.auth.auth_mode == "application":
-        app = build_confidential_client(config.azure, cache_path, tenant_id=tenant_id)
+        app = build_confidential_client(azure, cache_path, tenant_id=tenant_id)
         token = acquire_application_token(app)
         if not token:
             raise RuntimeError("Application auth failed")
         # app-only tokens cannot use /me, use /users/{upn}
+        record_login_event(config.repo_root, account.email, "application", tenant_id, run_id)
         return GraphClient(token["access_token"], user=account.email)
     raise RuntimeError(f"Unknown auth_mode: {config.auth.auth_mode}")
 
 
-def init_account(config: AppConfig, account: AccountConfig, runner_reply: CodexRunner) -> Dict[str, Any]:
+def _safe_account_name(email: str) -> str:
+    return email.replace("@", "_at_").replace("/", "_")
+
+
+def _ledger_paths(repo_root: Path, run_id: str, account_email: str) -> tuple[Path, Path]:
+    ledger_dir = run_ledger_dir(repo_root / "ledger")
+    ledger_path = ledger_dir / f"{_safe_account_name(account_email)}_{run_id}.json"
+    index_path = ledger_dir / "index.json"
+    return ledger_path, index_path
+
+
+def _write_ledger(repo_root: Path, account_email: str, actions: List[Dict[str, Any]], run_id: Optional[str] = None) -> str:
+    run_id = run_id or uuid.uuid4().hex[:12]
+    ledger_path, index_path = _ledger_paths(repo_root, run_id, account_email)
+    entry = {
+        "run_id": run_id,
+        "account": account_email,
+        "timestamp": utc_now().isoformat(),
+        "actions": actions,
+    }
+    save_json(ledger_path, entry)
+
+    index = load_json(index_path, {"order": [], "runs": {}})
+    if run_id not in index.get("runs", {}):
+        index["order"].append(run_id)
+    index["runs"][run_id] = {"timestamp": entry["timestamp"]}
+    save_json(index_path, index)
+    return run_id
+
+
+def _load_ledger(repo_root: Path, account_email: str, run_id: str) -> Optional[Dict[str, Any]]:
+    ledger_path, _ = _ledger_paths(repo_root, run_id, account_email)
+    if not ledger_path.exists():
+        return None
+    return load_json(ledger_path, None)
+
+
+def rollback_run(config: AppConfig, accounts: List[AccountConfig], run_id: str) -> Dict[str, Any]:
+    """
+    Best-effort rollback: revert message patches to previous categories/read/flag and
+    delete drafts created during the run.
+    """
+    results = {"run_id": run_id, "accounts": []}
+    for account in accounts:
+        ledger = _load_ledger(config.repo_root, account.email, run_id)
+        if not ledger:
+            continue
+        graph = _get_graph(config, account)
+        actions = list(reversed(ledger.get("actions", [])))
+        restored = 0
+        drafts_deleted = 0
+        for act in actions:
+            if act.get("type") == "message_patch":
+                before = act.get("before") or {}
+                msg_id = act.get("message_id")
+                if not msg_id:
+                    continue
+                patch: Dict[str, Any] = {}
+                if "categories" in before:
+                    patch["categories"] = before["categories"]
+                if "isRead" in before:
+                    patch["isRead"] = before["isRead"]
+                if "flag" in before:
+                    patch["flag"] = before["flag"]
+                if patch:
+                    graph.update_message(msg_id, patch)
+                    restored += 1
+            elif act.get("type") == "draft_created":
+                draft_id = act.get("draft_id")
+                if draft_id:
+                    try:
+                        graph.delete_message(draft_id)
+                        drafts_deleted += 1
+                    except Exception as exc:
+                        logger.warning("Failed to delete draft %s: %s", draft_id, exc)
+            elif act.get("type") == "tasks_file_append":
+                path = Path(act.get("path", ""))
+                prev_size = act.get("previous_size", 0)
+                if path.exists() and path.is_file():
+                    try:
+                        current_size = path.stat().st_size
+                        if current_size > prev_size:
+                            with path.open("r+b") as f:
+                                f.truncate(prev_size)
+                    except Exception as exc:
+                        logger.warning("Failed to rollback tasks file %s: %s", path, exc)
+
+        results["accounts"].append({"account": account.email, "restored": restored, "drafts_deleted": drafts_deleted})
+    return results
+
+
+def send_failure_notification(config: AppConfig, accounts: List[AccountConfig], subject: str, body_html: str, run_id: Optional[str] = None) -> bool:
+    """
+    Send a failure notification email using the first available account.
+    """
+    if not accounts:
+        logger.warning("No accounts available to send failure notification.")
+        return False
+    target_account = accounts[0]
+    graph = _get_graph(config, target_account, run_id=run_id)
+    to_address = config.triage.summary_email_to or target_account.email
+    try:
+        graph.send_mail(subject=subject, html_body=body_html, to_address=to_address)
+        return True
+    except Exception as exc:
+        logger.error("Failed to send failure notification: %s", exc)
+        return False
+
+
+def init_account(config: AppConfig, account: AccountConfig, runner_reply: CodexRunner, run_id: Optional[str] = None) -> Dict[str, Any]:
     state_root = account_state_dir(Path("./data"), account.email)
 
-    graph = _get_graph(config, account)
+    triage_cfg = config.triage_for_account(account)
+    graph = _get_graph(config, account, run_id=run_id)
 
-    inbox = graph.list_inbox_messages_since(config.triage.lookback_days_initial, max_messages=1000)
+    inbox = graph.list_inbox_messages_since(triage_cfg.lookback_days_initial, max_messages=1000)
     domain = account.email.split("@")[-1].lower()
     sender_stats: Dict[str, Any] = {}
     for msg in inbox:
@@ -381,7 +512,7 @@ def init_account(config: AppConfig, account: AccountConfig, runner_reply: CodexR
     save_json(state_root / "sender_stats.json", sender_stats)
 
     # tone profiles from sent items
-    sent = graph.list_sent_messages_since(config.triage.tone_profile_lookback_days, max_messages=800)
+    sent = graph.list_sent_messages_since(triage_cfg.tone_profile_lookback_days, max_messages=800)
     account_addr = account.email.lower()
     recip_map: Dict[str, List[Dict[str, Any]]] = {}
     for m in sent:
@@ -432,22 +563,29 @@ def init_account(config: AppConfig, account: AccountConfig, runner_reply: CodexR
     return {"account": account.email, "sender_stats": len(sender_stats), "tone_contacts": len(tone_profiles["contacts"])}
 
 
-def run_for_account(config: AppConfig, account: AccountConfig, runner_triage: CodexRunner, runner_reply: CodexRunner) -> Dict[str, Any]:
+def run_for_account(
+    config: AppConfig,
+    account: AccountConfig,
+    runner_triage: CodexRunner,
+    runner_reply: CodexRunner,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
     state_root = account_state_dir(Path("./data"), account.email)
     state = load_json(state_root / "state.json", {"first_run_completed": False, "last_run_utc": None})
 
-    graph = _get_graph(config, account)
+    triage_cfg = config.triage_for_account(account)
+    graph = _get_graph(config, account, run_id=run_id)
 
     # Ensure category colours exist before tagging messages so Outlook renders
     # the expected palette for priority / status tags.
     _ensure_category_colors(graph)
 
     if not state.get("first_run_completed"):
-        init_account(config, account, runner_reply)
+        init_account(config, account, runner_reply, run_id=run_id)
         state = load_json(state_root / "state.json", {"first_run_completed": True, "last_run_utc": None})
 
-    days_back = config.triage.lookback_days_incremental if state.get("last_run_utc") else config.triage.lookback_days_initial
-    msgs = graph.list_inbox_unprocessed_messages(days_back, max_messages=config.triage.max_messages_per_run)
+    days_back = triage_cfg.lookback_days_incremental if state.get("last_run_utc") else triage_cfg.lookback_days_initial
+    msgs = graph.list_inbox_unprocessed_messages(days_back, max_messages=triage_cfg.max_messages_per_run)
     if not msgs:
         state["last_run_utc"] = utc_now().isoformat()
         save_json(state_root / "state.json", state)
@@ -489,11 +627,27 @@ def run_for_account(config: AppConfig, account: AccountConfig, runner_triage: Co
     infos = []
     tasks = []
     drafts = 0
+    ledger_actions: List[Dict[str, Any]] = []
     for m in msgs:
         t = triage_map.get(m["id"])
         if not t:
             continue
-        patch, info, task, draft_id = _apply_triage_to_message(m, t, config.triage.draft_replies, config.triage.create_tasks, graph)
+        patch, info, task, draft_id, before_state = _apply_triage_to_message(
+            m,
+            t,
+            triage_cfg.draft_replies,
+            triage_cfg.create_tasks,
+            triage_cfg.priority_read_state,
+            graph,
+        )
+        ledger_actions.append(
+            {
+                "type": "message_patch",
+                "message_id": m["id"],
+                "before": before_state,
+                "patch": patch,
+            }
+        )
         graph.update_message(m["id"], patch)
         if info:
             infos.append(info)
@@ -501,22 +655,34 @@ def run_for_account(config: AppConfig, account: AccountConfig, runner_triage: Co
             tasks.append(task)
         if draft_id:
             drafts += 1
+            ledger_actions.append({"type": "draft_created", "draft_id": draft_id, "message_id": m["id"]})
 
-    if config.triage.create_tasks and tasks:
-        _write_tasks_file(state_root, tasks)
-    if config.triage.log_to_file:
+    if triage_cfg.create_tasks and tasks:
+        tasks_path = state_root / "tasks.md"
+        prev_size = tasks_path.stat().st_size if tasks_path.exists() else 0
+        written_path = _write_tasks_file(state_root, tasks)
+        ledger_actions.append(
+            {
+                "type": "tasks_file_append",
+                "path": str(written_path),
+                "previous_size": prev_size,
+            }
+        )
+    if triage_cfg.log_to_file:
         _write_log_file(state_root, msgs, triage_map)
+    if ledger_actions:
+        _write_ledger(config.repo_root, account.email, ledger_actions, run_id=run_id)
 
     summary_sent = False
-    if config.triage.send_summary_email and infos and config.triage.summary_email_to:
+    if triage_cfg.send_summary_email and infos and triage_cfg.summary_email_to:
         # Send summary from the mailbox specified in config (must be configured)
         # If this run is not for that mailbox, we still send from that mailbox by creating a second GraphClient.
-        from_acc = config.triage.summary_email_from_account or account.email
+        from_acc = triage_cfg.summary_email_from_account or account.email
         from_account_obj = next((a for a in config.accounts if a.email.lower() == from_acc.lower()), None)
         if from_account_obj:
-            graph_sender = _get_graph(config, from_account_obj)
+            graph_sender = _get_graph(config, from_account_obj, run_id=run_id)
             html = _summary_email_html(infos, account.email)
-            graph_sender.send_mail(subject=f"Informational email summary for {account.label}", html_body=html, to_address=config.triage.summary_email_to)
+            graph_sender.send_mail(subject=f"Informational email summary for {account.label}", html_body=html, to_address=triage_cfg.summary_email_to)
             summary_sent = True
 
     state["last_run_utc"] = utc_now().isoformat()

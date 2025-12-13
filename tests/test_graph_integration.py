@@ -2,7 +2,7 @@
 Manual integration checks against the primary mailbox.
 
 Prerequisites (do not commit secrets):
-- `config.toml` populated with a primary account and application-auth settings.
+- `config/config.toml` populated with a primary account and application-auth settings.
 - `MS_GRAPH_CLIENT_SECRET` exported in the shell.
 
 Notes:
@@ -12,6 +12,7 @@ Notes:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Dict, Optional
 from uuid import uuid4
@@ -30,17 +31,18 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture(scope="session")
 def app_config():
-    load_env_file()
-    cfg_path = Path("config.toml")
+    repo_root = Path(__file__).resolve().parents[1]
+    load_env_file(repo_root / ".env")
+    cfg_path = repo_root / "config" / "config.toml"
     if not cfg_path.exists():
-        pytest.skip("config.toml missing; create from config.example.toml with primary account settings")
+        pytest.skip("config/config.toml missing; create from config/config.example.toml with primary account settings")
     return load_config(cfg_path)
 
 
 @pytest.fixture(scope="session")
 def primary_account(app_config):
     if not app_config.accounts:
-        pytest.skip("No accounts configured in config.toml")
+        pytest.skip("No accounts configured in config/config.toml")
     return app_config.accounts[0]
 
 
@@ -49,9 +51,16 @@ def graph(app_config, primary_account):
     if app_config.auth.auth_mode != "application":
         pytest.skip("Integration tests expect application auth for unattended runs")
 
+    if not os.environ.get(app_config.azure.client_secret_env):
+        pytest.skip(f"Missing client secret env var {app_config.azure.client_secret_env}")
+
+    cache_path = Path(app_config.auth.token_cache_path)
+    if not cache_path.is_absolute():
+        cache_path = app_config.repo_root / cache_path
+
     client = auth.build_confidential_client(
         azure=app_config.azure,
-        cache_path=Path(app_config.auth.token_cache_path),
+        cache_path=cache_path,
         tenant_id=primary_account.tenant_id or app_config.azure.tenant_id,
     )
     token = auth.acquire_application_token(client)

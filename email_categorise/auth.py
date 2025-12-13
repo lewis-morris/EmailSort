@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 import msal  # type: ignore[import]
 from msal_extensions import FilePersistence, PersistedTokenCache  # type: ignore[import]
 
 from .config import AzureConfig
-from .utils import ensure_dir, load_env_file
+from .utils import ensure_dir, load_env_file, save_json
 
 logger = logging.getLogger("email_categorise.auth")
 
@@ -25,6 +26,30 @@ def _build_cache(cache_path: Path) -> PersistedTokenCache:
 def _authority(azure: AzureConfig, tenant_id: str) -> str:
     base = azure.authority_base.rstrip("/")
     return f"{base}/{tenant_id}"
+
+
+def record_login_event(repo_root: Path, account_email: str, auth_mode: str, tenant_id: str, run_id: Optional[str]) -> Path:
+    """
+    Persist non-sensitive auth/session metadata for audit/rollback awareness.
+    Tokens remain only in MSAL cache.
+    """
+    login_dir = ensure_dir(repo_root / "login")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe = account_email.replace("@", "_at_").replace("/", "_")
+    rid = run_id or "norun"
+    path = login_dir / f"{safe}_{stamp}_{rid}.json"
+    save_json(
+        path,
+        {
+            "account": account_email,
+            "auth_mode": auth_mode,
+            "tenant_id": tenant_id,
+            "run_id": run_id,
+            "agent_type": "email_categorise",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    return path
 
 
 def build_public_client(azure: AzureConfig, cache_path: Path, tenant_id: str) -> msal.PublicClientApplication:

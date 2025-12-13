@@ -3,14 +3,14 @@
 ## Project Structure & Module Organization
 - Source lives in `email_categorise/` (CLI wiring in `cli.py`, config loading in `config.py`, Graph + MSAL helpers in `auth.py`/`graph_client.py`, LLM runners in `codex_runner.py`, triage logic in `triage_logic.py`, shared helpers in `utils.py`).
 - Entry points: `run_email_categorise.sh` (preferred) or `python -m email_categorise ...`. A thin `main.py` also exists for tooling.
-- Config: `config.toml` (copy from `config.example.toml`). Runtime state under `data/`; logs and markdown reports under `output/`.
+- Config: `config/config.toml` (copy from `config/config.example.toml`). Runtime state under `data/`; logs and markdown reports under `output/`.
 - Schemas/prompts: `email_categorise/json_schemas` and `email_categorise/email_triage_agent.md` guide model outputs.
 
 ## Setup, Build & Run
-- Install dependencies with the pinned toolchain: `~/.codex-tools/python-tools/bin/pip install -r requirements.txt` (Python 3.12+).
-- Initialise accounts (build sender stats + tone profiles): `./run_email_categorise.sh init --config config.toml [-a user@domain]`.
-- Daily triage run: `./run_email_categorise.sh run --config config.toml [-a user@domain]`.
-- Direct invocation (useful for debugging): `python -m email_categorise run --config config.toml -v`.
+- Install dependencies with the pinned toolchain: `~/.codex-tools/environments/python-tools/bin/pip install -r requirements.txt` (Python 3.12+).
+- Initialise accounts (build sender stats + tone profiles): `./run_email_categorise.sh init --config config/config.toml [-a user@domain]`.
+- Daily triage run: `./run_email_categorise.sh run --config config/config.toml [-a user@domain]`.
+- Direct invocation (useful for debugging): `python -m email_categorise run --config config/config.toml -v`.
 - Logs are tee’d to `output/email_categorise_<cmd>_<UTCSTAMP>.log`; the latest markdown summary is `<cmd>_..._.last.md`.
 
 ## Coding Style & Naming Conventions

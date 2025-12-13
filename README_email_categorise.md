@@ -2,12 +2,14 @@
 
 This project is designed to live at:
 
-`~/.codex-tools/email_categorise`
+`~/.codex-tools/bin/email_categorise`
 
 It runs as a normal CLI so you can schedule it (cron/systemd timers) and it stores all state under:
 
-- `./data/` (MSAL cache, sender stats, tone profiles, run state)
+- `./data/` (MSAL cache, sender stats, tone profiles, run state, weekly test marker)
 - `./output/` (timestamped logs + markdown run reports)
+- `./ledger/` (run-level action ledgers for rollback)
+- `./login/` (non-sensitive login/session metadata per run)
 
 ## What works today
 
@@ -100,41 +102,86 @@ https://learn.microsoft.com/en-us/python/api/msal/msal.application.clientapplica
 ## Install (python-tools venv)
 
 ```bash
-~/.codex-tools/python-tools/bin/pip install -r ~/.codex-tools/email_categorise/requirements.txt
+~/.codex-tools/environments/python-tools/bin/pip install -r ~/.codex-tools/bin/email_categorise/requirements.txt
 ```
 
 ## Setup (config)
 
 ```bash
-cd ~/.codex-tools/email_categorise
-cp config.example.toml config.toml
+cd ~/.codex-tools/bin/email_categorise
+cp config/config.example.toml config/config.toml
 ```
 
-Edit:
-- `[azure].client_id`
-- `[azure].tenant_id` (tenant GUID recommended for application auth)
-- Set env var for your client secret:
-  - `export MS_GRAPH_CLIENT_SECRET="..."` (do not store in files)
-- Add `[[accounts]]` entries
+Key settings:
+- `[azure]` default app credentials; per-account overrides are supported under `[[accounts]].azure_overrides`.
+- `[triage]` defaults for behaviours; per-account overrides under `[[accounts]].triage_overrides`.
+- `[triage.priority_read_state]` controls post-triage read/unread per category.
+- Env var for secrets: `MS_GRAPH_CLIENT_SECRET` (or override name per account).
+
+Per-account overrides (example)
+--------------------------------
+You can override most Azure and triage settings for a specific mailbox without changing the global defaults:
+
+```toml
+[[accounts]]
+email = "mike@colemanbros.co.uk"
+label = "mike"
+
+# Azure overrides for this mailbox (auth/tenant/secret)
+[ [accounts].azure_overrides ]
+client_id = "slakdl;askjkd;23472fe8-0700-48e1-a0e3-d351cc6bda0c"
+tenant_id = "92f217f9-7fcf-as';kd;l'askdasl;k4d40-a990-f36c1737cfa8"
+client_secret_env = "MS_GRAPH_CLIENT_SECRETER"  # env var name holding the secret
+
+# Triage behaviour overrides for this mailbox
+[ [accounts].triage_overrides ]
+log_to_file = true
+send_summary_email = true
+summary_email_to = "mike@colemanbros.co.uk"  # optional, defaults to global
+```
+
+Notes:
+- Any key omitted in an overrides block falls back to the global `[azure]` / `[triage]` defaults.
+- `tenant_id` can also be set directly on the account (`tenant_id = "..."`), but values in `azure_overrides.tenant_id` win if both are present.
+- `client_secret_env` is the name of an environment variable (per-account if overridden) that must be set in the shell before running.
 
 ## Run
 
 ### Init (build sender stats + tone profiles)
 ```bash
-./run_email_categorise.sh init --config config.toml
+./run_email_categorise.sh init --config config/config.toml [-a user@domain] [--run-id RID]
 ```
 
 ### Daily triage run
 ```bash
-./run_email_categorise.sh run --config config.toml
+./run_email_categorise.sh run --config config/config.toml [-a user@domain] [--run-id RID] \\
+  [--draft-replies|--no-draft-replies] [--create-tasks|--no-create-tasks] \\
+  [--summary-email|--no-summary-email] [--log-to-file|--no-log-to-file] \\
+  [--undo-last | --rollback RUN_ID]
 ```
 
 Outputs:
 - `output/email_categorise_<cmd>_<UTCSTAMP>.log`
 - `output/email_categorise_<cmd>_<UTCSTAMP>.last.md`
+- Ledger per run: `ledger/<account>_<run-id>.json`; index at `ledger/index.json`
+- Login audit: `login/<account>_<timestamp>_<run-id>.json`
 
 State:
 - `data/<account>/state.json`
 - `data/<account>/sender_stats.json`
 - `data/<account>/tone_profiles.json`
 - `data/msal_token_cache.bin`
+- `data/last_tests.json` (weekly test guard marker)
+
+### New helper scripts
+- `scripts/init_email.sh` — wraps init with defaults and logging.
+- `scripts/run_email.sh` — wraps daily run, defaulting all actions to on; flags above toggle.
+`run_email_categorise.sh` dispatches to these when `init`/`run` is used.
+
+### Weekly test guard
+- On `init`/`run`, if `data/last_tests.json` older than 7 days, runs `pytest`.
+- Aborts triage on failure and emails a failure notice to `triage.summary_email_to` (or account email).
+
+### Rollback
+- Each run records message patches, draft creations, and task file appends in `ledger/`.
+- Use `--undo-last` or `--rollback <run-id>` to restore categories/read/flags, delete drafts, and truncate task appends.

@@ -168,33 +168,50 @@ label = "primary"
 # Optional override if this mailbox is in a different tenant:
 # tenant_id = "YOUR_TENANT_GUID"
 
-# [[accounts]]
-# email = "other@another-tenant.com"
-# label = "other-org"
-# tenant_id = "OTHER_TENANT_GUID"
+# Optional: per-account overrides for this (primary) mailbox.
+# Uncomment and adjust as needed; any keys not set here fall back to the
+# global [azure] / [triage] defaults above.
+#
+# [accounts.azure_overrides]
+# client_id = "PRIMARY_CLIENT_APP_ID"
+# tenant_id = "PRIMARY_TENANT_ID"
+# client_secret_env = "PRIMARY_MS_GRAPH_SECRET"
+# # Optional per-account delegated scopes (only if auth_mode="delegated")
+# # delegated_scopes = ["Mail.ReadWrite", "Mail.Send"]
+#
+# [accounts.triage_overrides]
+# draft_replies = true
+# create_tasks = true
+# send_summary_email = true
+# log_to_file = true
+# summary_email_to = "primary-ops@example.com"
+# summary_email_from_account = "lewis@colemanbros.co.uk"
+#   [accounts.triage_overrides.priority_read_state]
+#   "Priority 1" = false
+#   "Priority 2" = true
 
-# Example with per-account overrides:
-[[accounts]]
-email = "client-mailbox@example.com"
-label = "client-org"
+# Example of a second mailbox with its own overrides:
+#[[accounts]]
+#email = "client-mailbox@example.com"
+#label = "client-org"
 
-# Optional: override tenant/app credentials for this account
-[accounts.azure_overrides]
-client_id = "CLIENT_APP_ID"
-tenant_id = "CLIENT_TENANT_ID"
-# If the secret env var differs for this account:
-client_secret_env = "CLIENT_MS_GRAPH_SECRET"
-# Optional per-account delegated scopes (only if auth_mode=\"delegated\")
-# delegated_scopes = ["Mail.ReadWrite", "Mail.Send"]
-
-# Optional: per-account behaviour toggles (fall back to [triage] defaults)
-[accounts.triage_overrides]
-draft_replies = true
-create_tasks = true
-send_summary_email = true
-log_to_file = true
-summary_email_to = "ops@example.com"
-summary_email_from_account = "client-mailbox@example.com"
-  [accounts.triage_overrides.priority_read_state]
-  "Priority 1" = false
-  "Priority 2" = true   # Example: auto-mark P2 as read for this account
+## Optional: override tenant/app credentials for this account
+#[accounts.azure_overrides]
+#client_id = "CLIENT_APP_ID"
+#tenant_id = "CLIENT_TENANT_ID"
+## If the secret env var differs for this account:
+#client_secret_env = "CLIENT_MS_GRAPH_SECRET"
+## Optional per-account delegated scopes (only if auth_mode=\"delegated\")
+## delegated_scopes = ["Mail.ReadWrite", "Mail.Send"]
+#
+## Optional: per-account behaviour toggles (fall back to [triage] defaults)
+#[accounts.triage_overrides]
+#draft_replies = true
+#create_tasks = true
+#send_summary_email = true
+#log_to_file = true
+#summary_email_to = "ops@example.com"
+#summary_email_from_account = "client-mailbox@example.com"
+#  [accounts.triage_overrides.priority_read_state]
+#  "Priority 1" = false
+#  "Priority 2" = true   # Example: auto-mark P2 as read for this account

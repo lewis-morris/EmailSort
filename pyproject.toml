@@ -1,14 +1,31 @@
 [project]
 name = "email-categorise"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.3.0"
+description = "Email triage for busy developers using Microsoft Graph and LLM backends (Codex, OpenAI-compatible, or local Hugging Face)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "python-dotenv",
     "msal",
     "msal-extensions",
     "requests",
     "toml",
+    "jsonschema",
     "pytest>=9.0.2",
 ]
+
+[project.optional-dependencies]
+openai = [
+    "openai>=1.0.0",
+]
+hf-local = [
+    "torch",
+    "transformers",
+]
+finetune = [
+    "torch",
+    "transformers",
+    "datasets",
+]
+
+[project.scripts]
+email-categorise = "email_categorise.cli:main"

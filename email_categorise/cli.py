@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import load_config, AccountConfig
-from .fine_tune import export_reply_dataset
+from .fine_tune import export_reply_dataset, train_local_reply_model
 from .model_client import StructuredLLMRunner, build_model_clients
 from .triage_logic import (
     init_account,
@@ -173,6 +173,47 @@ def main() -> None:
         help="Maximum Sent Items messages to export per account (default: 500)",
     )
 
+    p_ft_train = sub.add_parser("train-finetune")
+    p_ft_train.add_argument(
+        "--dataset",
+        required=True,
+        help="Path to JSONL dataset exported with 'export-finetune'",
+    )
+    p_ft_train.add_argument(
+        "--base-model",
+        required=True,
+        help="Base Hugging Face model id to fine-tune (e.g. meta-llama/Meta-Llama-3.1-8B-Instruct)",
+    )
+    p_ft_train.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory to save the fine-tuned model (HF local path)",
+    )
+    p_ft_train.add_argument(
+        "--max-steps",
+        type=int,
+        default=500,
+        help="Maximum training steps (default: 500)",
+    )
+    p_ft_train.add_argument(
+        "--learning-rate",
+        type=float,
+        default=5e-5,
+        help="Learning rate for fine-tuning (default: 5e-5)",
+    )
+    p_ft_train.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Per-device train batch size (default: 1)",
+    )
+    p_ft_train.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=1024,
+        help="Maximum sequence length for training (default: 1024)",
+    )
+
     args = parser.parse_args()
     configure_logging(args.verbose or 0)
 
@@ -286,5 +327,35 @@ def main() -> None:
             )
         md_lines.append("")
         report_path = _write_report(cfg.repo_root, "export-finetune", "\n".join(md_lines))
+        print(f"Report: {report_path}")
+        return
+
+    if args.cmd == "train-finetune":
+        from pathlib import Path as _Path
+
+        dataset_path = _Path(args.dataset)
+        output_dir = _Path(args.output_dir)
+        res = train_local_reply_model(
+            dataset_path=dataset_path,
+            base_model_id=args.base_model,
+            output_dir=output_dir,
+            max_steps=args.max_steps,
+            learning_rate=args.learning_rate,
+            batch_size=args.batch_size,
+            max_seq_len=args.max_seq_len,
+        )
+        md_lines = [
+            "# train-finetune report",
+            "",
+            f"- base_model: `{res['base_model']}`",
+            f"- dataset: `{res['dataset']}`",
+            f"- output_dir: `{res['output_dir']}`",
+            f"- max_steps: {res['max_steps']}",
+            f"- learning_rate: {res['learning_rate']}",
+            f"- batch_size: {res['batch_size']}",
+            f"- max_seq_len: {res['max_seq_len']}",
+            "",
+        ]
+        report_path = _write_report(cfg.repo_root, "train-finetune", "\n".join(md_lines))
         print(f"Report: {report_path}")
         return

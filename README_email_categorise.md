@@ -188,6 +188,32 @@ State:
 - `data/msal_token_cache.bin`
 - `data/last_tests.json` (weekly test guard marker)
 
+### Optional: fine-tune support
+
+To prepare a dataset for training a local reply model in your tone (no changes
+to the main triage flow):
+
+```bash
+./run_email_categorise.sh export-finetune --config config/config.toml -a user@domain \\
+  --output-dir output/finetune --max-messages 500
+```
+
+This writes one JSONL file per account with Sent Items examples.
+
+To run a small local fine-tune (requires `torch`, `transformers`, `datasets`
+installed and enough hardware for your chosen base model):
+
+```bash
+python -m email_categorise train-finetune \\
+  --dataset output/finetune/finetune_user_at_domain.jsonl \\
+  --base-model meta-llama/Meta-Llama-3.1-8B-Instruct \\
+  --output-dir /path/to/fine_tuned_model_dir
+```
+
+You can then register the result as a `hf-local` model in `config.toml`
+(`models.reply_finetuned`) and, if desired, point `[llm].reply_model` at that
+entry to start using it.
+
 ### New helper scripts
 - `scripts/init_email.sh` — wraps init with defaults and logging.
 - `scripts/run_email.sh` — wraps daily run, defaulting all actions to on; flags above toggle.

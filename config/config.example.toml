@@ -153,6 +153,15 @@ model = "gpt-5.1-codex-max"
 # hf_device = "auto"
 # hf_max_new_tokens = 768
 
+# After running a local fine-tune (see `train-finetune` CLI command), you can
+# register the resulting model directory as an optional reply model:
+#
+# [models.reply_finetuned]
+# provider = "hf-local"
+# model = "/absolute/or/relative/path/to/your/fine_tuned_model_dir"
+# hf_device = "auto"
+# hf_max_new_tokens = 768
+
 [[accounts]]
 email = "lewis@colemanbros.co.uk"
 label = "primary"

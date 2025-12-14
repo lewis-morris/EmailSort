@@ -35,6 +35,14 @@ lookback_days_initial = 60
 lookback_days_incremental = 3
 max_messages_per_run = 40
 
+# Body handling (LLM prompt)
+# plaintext | html
+body_format = "plaintext"
+# 0 = unlimited characters; otherwise truncate message body before sending to LLM
+body_max_chars = 0
+# Limit messages per thread when building context (0 = unlimited)
+thread_max_messages = 0
+
 # Tone profiling: Sent Items lookback for building tone profiles
 tone_profile_lookback_days = 120
 
@@ -61,39 +69,89 @@ default = false
 "Informational" = false
 "Complete" = true
 "Possibly Complete" = true
+"Payment Request" = false
+"Invoice" = false
+"Order Confirmation" = false
+"Issue" = false
+"Task" = false
 
 [llm]
 # LLM provider for triage + tone profiling + drafting.
 #
 # provider:
 # - "codex": use Codex CLI (recommended). No API key needed if Codex is authenticated already.
-# - "codex-oss": use Codex CLI with --oss (routes to local provider, requires Ollama).
+# - "codex-oss": use Codex CLI with --oss (routes to local provider, e.g. Ollama).
+# - "openai": use the OpenAI API directly (requires `openai` Python package + API key).
+# - "openai-compatible": use any OpenAI-compatible HTTP endpoint (local vLLM/TGI/LM Studio/Ollama, etc.).
+# - "hf-local": run a local Hugging Face model via `transformers`/`torch` (no HTTP needed).
 provider = "codex"
 
-# Codex-only models (work with ChatGPT credits + codex exec)
-# Balanced cost/speed: mini for triage, max for replies.
-triage_model = "gpt-5.1-codex-mini"
-reply_model  = "gpt-5.1-codex-max"
+# These are logical model names that point at entries under [models].
+# You can swap models by changing these keys without touching the rest of the config.
+triage_model = "triage_codex"
+reply_model  = "reply_codex"
 
-# Cheaper/faster (lowest cost, lowest quality):
-# triage_model = "gpt-5.1-codex-mini"
-# reply_model  = "gpt-5.1-codex-mini"
+[models.triage_codex]
+provider = "codex"
+model = "gpt-5.1-codex-mini"
 
-# More accurate (slower/costlier):
-# triage_model = "gpt-5.1-codex-max"
-# reply_model  = "gpt-5.1-codex-max"
+[models.reply_codex]
+provider = "codex"
+model = "gpt-5.1-codex-max"
 
-# If provider="codex-oss", you can use local models via Ollama.
-# Example:
+# Example: cheaper/faster Codex-only setup (same model for both triage + replies)
+# [models.triage_codex_fast]
+# provider = "codex"
+# model = "gpt-5.1-codex-mini"
+#
+# [models.reply_codex_fast]
+# provider = "codex"
+# model = "gpt-5.1-codex-mini"
+
+# Example: Codex OSS via Ollama (requires Codex CLI `--oss` configured)
+# [models.triage_codex_oss]
 # provider = "codex-oss"
-# triage_model = "llama3.1"
-# reply_model  = "llama3.1"
-
-# If provider="codex-oss", you can use local models via Ollama.
-# Example:
+# model = "llama3.1"
+#
+# [models.reply_codex_oss]
 # provider = "codex-oss"
-# triage_model = "llama3.1"
-# reply_model  = "llama3.1"
+# model = "llama3.1"
+
+# Example: OpenAI-compatible HTTP endpoint (local vLLM / TGI / LM Studio / Ollama)
+# [models.triage_local_http]
+# provider = "openai-compatible"
+# model = "gpt-4.1-mini"
+# base_url = "http://localhost:11434/v1"
+# api_key_env = "LOCAL_OPENAI_API_KEY"
+#
+# [models.reply_local_http]
+# provider = "openai-compatible"
+# model = "gpt-4.1"
+# base_url = "http://localhost:11434/v1"
+# api_key_env = "LOCAL_OPENAI_API_KEY"
+
+# Example: Hugging Face local models (loaded via transformers/torch)
+# Good starting points for triage / tone profiling (small, fast):
+# - microsoft/Phi-3.5-mini-instruct
+# - Qwen/Qwen2.5-3B-Instruct
+# - mistralai/Mistral-7B-Instruct-v0.3
+#
+# [models.triage_hf]
+# provider = "hf-local"
+# model = "microsoft/Phi-3.5-mini-instruct"
+# hf_device = "auto"           # "cuda", "cpu", or "auto"
+# hf_max_new_tokens = 512
+#
+# For reply drafting (more nuance, longer outputs), consider:
+# - meta-llama/Meta-Llama-3.1-8B-Instruct
+# - Qwen/Qwen2.5-7B-Instruct
+# - mistralai/Mixtral-8x7B-Instruct-v0.1 (heavier)
+#
+# [models.reply_hf]
+# provider = "hf-local"
+# model = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+# hf_device = "auto"
+# hf_max_new_tokens = 768
 
 [[accounts]]
 email = "lewis@colemanbros.co.uk"

@@ -53,15 +53,30 @@ This is stored per account in:
 
 and is injected into the prompt for drafting replies.
 
-### LLM backend (Codex exec)
-This project calls models via **Codex CLI non-interactive mode**:
+### LLM backend (Codex + OSS/local)
+This project now routes all model calls through a small **model registry** and a
+provider-agnostic client:
 
-- `codex exec` supports piping prompt content from stdin using `-`.  
-  https://developers.openai.com/codex/cli/reference/
-- It supports **structured JSON** via `--output-schema <path>` and saving output with `-o`.  
-  https://developers.openai.com/codex/sdk/
-- It supports local OSS providers (Ollama) via `--oss`.  
-  https://developers.openai.com/codex/cli/reference/
+- Models are defined in `config/config.toml` under `[models.*]` and selected via
+  `[llm]` (`triage_model` / `reply_model`).
+- For **Codex** / **Codex OSS**, it still shells out to `codex exec` under the hood
+  (non-interactive mode, stdin via `-`, JSON Schema validation).
+  - `codex exec` reference: https://developers.openai.com/codex/cli/reference/
+  - JSON schema / SDK docs: https://developers.openai.com/codex/sdk/
+- For **OpenAI / OpenAI-compatible** providers, it uses the `openai` Python client
+  with an optional `base_url` so you can point at local servers (vLLM, TGI,
+  LM Studio, Ollama `/v1`, etc.).
+- For **Hugging Face local** models (`provider="hf-local"`), it loads a local
+  `transformers`/`torch` model id and generates JSON directly on your machine
+  (no HTTP hop); good candidates include:
+  - Triage / tone: `microsoft/Phi-3.5-mini-instruct`, `Qwen/Qwen2.5-3B-Instruct`,
+    `mistralai/Mistral-7B-Instruct-v0.3`.
+  - Replies: `meta-llama/Meta-Llama-3.1-8B-Instruct`, `Qwen/Qwen2.5-7B-Instruct`,
+    `mistralai/Mixtral-8x7B-Instruct-v0.1` (heavier).
+
+All providers go through the same JSON Schema validation step using the schemas
+in `email_categorise/json_schemas`, and the validated outputs are written under
+`data/<account>/...` for auditability.
 
 ## Things you enabled that are NOT used yet (future options)
 

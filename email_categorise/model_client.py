@@ -31,7 +31,13 @@ class ModelClient:
 
     definition: ModelDefinition
 
-    def chat_json(self, system_prompt: str, user_content: str, *, schema_path: Optional[Path] = None) -> Dict[str, Any]:
+    def chat_json(
+        self,
+        system_prompt: str,
+        user_content: str,
+        *,
+        schema_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
         provider = (self.definition.provider or "").strip().lower()
 
         if provider in {"codex", "codex-oss"}:
@@ -39,21 +45,28 @@ class ModelClient:
                 raise ValueError(
                     f"schema_path is required for provider '{provider}' (model={self.definition.name})."
                 )
-            return self._chat_json_codex(system_prompt, user_content, schema_path=schema_path)
+            return self._chat_json_codex(
+                system_prompt, user_content, schema_path=schema_path
+            )
 
         if provider in {"openai", "openai-compatible"}:
             return self._chat_json_openai(system_prompt, user_content)
 
+        if provider == "hf-local":
+            return self._chat_json_hf_local(system_prompt, user_content)
+
         raise ValueError(
             f"Unknown model provider '{self.definition.provider}' for model '{self.definition.name}'. "
-            "Supported: codex, codex-oss, openai, openai-compatible"
+            "Supported: codex, codex-oss, openai, openai-compatible, hf-local"
         )
 
     # -----------------------------
     # Codex CLI provider
     # -----------------------------
 
-    def _chat_json_codex(self, system_prompt: str, user_content: str, *, schema_path: Path) -> Dict[str, Any]:
+    def _chat_json_codex(
+        self, system_prompt: str, user_content: str, *, schema_path: Path
+    ) -> Dict[str, Any]:
         schema_path = schema_path.expanduser().resolve()
         if not schema_path.exists():
             raise FileNotFoundError(f"Schema file not found: {schema_path}")
@@ -111,7 +124,9 @@ class ModelClient:
             if proc.returncode != 0:
                 stderr = (proc.stderr or "").strip()
                 stdout = (proc.stdout or "").strip()
-                logger.error("codex exec failed (rc=%s). stderr=%s", proc.returncode, stderr)
+                logger.error(
+                    "codex exec failed (rc=%s). stderr=%s", proc.returncode, stderr
+                )
                 raise RuntimeError(
                     "codex exec failed. "
                     f"rc={proc.returncode}. "
@@ -132,9 +147,12 @@ class ModelClient:
     # OpenAI API provider (optional)
     # -----------------------------
 
-    def _chat_json_openai(self, system_prompt: str, user_content: str) -> Dict[str, Any]:
+    def _chat_json_openai(
+        self, system_prompt: str, user_content: str
+    ) -> Dict[str, Any]:
         # Lazy import so Codex-only installs don't need the dependency.
         from .utils import load_env_file
+
         load_env_file()
         try:
             from openai import OpenAI  # type: ignore[import]
@@ -177,6 +195,82 @@ class ModelClient:
             raise RuntimeError("Model returned empty content")
         return _parse_json_lenient(content)
 
+    # -----------------------------
+    # Hugging Face local provider
+    # -----------------------------
+
+    def _chat_json_hf_local(
+        self, system_prompt: str, user_content: str
+    ) -> Dict[str, Any]:
+        """Run a local Hugging Face model to produce JSON.
+
+        This assumes you have installed `transformers` (and usually `torch`)
+        and downloaded the model specified in `self.definition.model`.
+        """
+
+        try:
+            import torch  # type: ignore[import]
+            from transformers import (  # type: ignore[import]
+                AutoModelForCausalLM,
+                AutoTokenizer,
+            )
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Provider 'hf-local' requires the 'transformers' and 'torch' "
+                "packages to be installed."
+            ) from exc
+
+        # Lazy-load and cache model/tokenizer on the client instance.
+        if not hasattr(self, "_hf_model"):
+            model_id = self.definition.model
+            if not model_id:
+                raise RuntimeError(
+                    f"Model id is required for provider='hf-local' "
+                    f"(definition={self.definition.name})."
+                )
+
+            logger.info("Loading Hugging Face model %s for %s", model_id, self.definition.name)
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = AutoModelForCausalLM.from_pretrained(model_id)
+
+            device = self.definition.hf_device or (
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
+            model.to(device)
+
+            setattr(self, "_hf_tokenizer", tokenizer)
+            setattr(self, "_hf_model", model)
+            setattr(self, "_hf_device", device)
+
+        tokenizer = getattr(self, "_hf_tokenizer")
+        model = getattr(self, "_hf_model")
+        device = getattr(self, "_hf_device")
+
+        prompt = (
+            "System instructions:\n"
+            + system_prompt.strip()
+            + "\n\nUser input:\n"
+            + user_content.strip()
+            + "\n\nReturn ONLY valid JSON that matches the expected schema."
+        )
+
+        inputs = tokenizer(prompt, return_tensors="pt")
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        max_new_tokens = self.definition.hf_max_new_tokens or 512
+
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=0.2,
+            )
+
+        # Only keep tokens generated beyond the prompt.
+        generated = output_ids[0][inputs["input_ids"].shape[1] :]
+        text = tokenizer.decode(generated, skip_special_tokens=True)
+        return _parse_json_lenient(text)
+
 
 def _parse_json_lenient(text: str) -> Dict[str, Any]:
     """Parse model output that *should* be JSON.
@@ -217,5 +311,59 @@ def _parse_json_lenient(text: str) -> Dict[str, Any]:
             raise RuntimeError("Model returned invalid JSON") from exc
 
 
+@dataclass
+class StructuredLLMRunner:
+    """Adapter to run a ModelClient with JSON Schema validation and file output.
+
+    This mirrors the existing CodexRunner.run_with_schema interface so that
+    triage and init code can stay provider-agnostic.
+    """
+
+    client: ModelClient
+
+    def run_with_schema(
+        self, prompt: str, schema_path: Path, output_path: Path
+    ) -> Dict[str, Any]:
+        schema_path = schema_path.expanduser().resolve()
+        if not schema_path.exists():
+            raise FileNotFoundError(f"Schema file not found: {schema_path}")
+
+        output_path = output_path.expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Call through the generic interface. We treat the entire prompt as the
+        # "user" content; system_prompt is left empty.
+        result = self.client.chat_json(
+            system_prompt="",
+            user_content=prompt,
+            schema_path=schema_path,
+        )
+
+        # Provider-agnostic JSON Schema validation.
+        try:
+            import jsonschema  # type: ignore[import]
+        except Exception as exc:  # pragma: no cover
+            logger.error(
+                "jsonschema package is required for schema validation. Error: %s", exc
+            )
+            raise RuntimeError(
+                "jsonschema package is required for validating LLM output "
+                "against JSON schemas."
+            ) from exc
+
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        try:
+            jsonschema.validate(instance=result, schema=schema)  # type: ignore[attr-defined]
+        except jsonschema.ValidationError as exc:  # type: ignore[attr-defined]
+            logger.error("Model output failed schema validation: %s", exc)
+            raise
+
+        output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        return result
+
+
 def build_model_clients(config: AppConfig) -> Dict[str, ModelClient]:
-    return {name: ModelClient(definition=definition) for name, definition in config.models.items()}
+    return {
+        name: ModelClient(definition=definition)
+        for name, definition in config.models.items()
+    }

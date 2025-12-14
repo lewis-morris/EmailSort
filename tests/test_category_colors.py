@@ -14,7 +14,10 @@ from email_categorise.triage_logic import CATEGORY_COLORS
 
 
 def _fake_existing(categories: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    return [{"displayName": c[0], "color": c[1], "id": f"id-{i}"} for i, c in enumerate(categories)]
+    return [
+        {"displayName": c[0], "color": c[1], "id": f"id-{i}"}
+        for i, c in enumerate(categories)
+    ]
 
 
 def test_plan_category_updates_create_and_update_and_keep():
@@ -23,10 +26,12 @@ def test_plan_category_updates_create_and_update_and_keep():
         "Priority 1": "orange",
         "Priority 2": "yellow",
     }
-    existing = _fake_existing([
-        ("Urgent", "yellow"),  # needs update
-        ("Priority 2", "yellow"),  # unchanged
-    ])
+    existing = _fake_existing(
+        [
+            ("Urgent", "yellow"),  # needs update
+            ("Priority 2", "yellow"),  # unchanged
+        ]
+    )
 
     plan = _plan_category_updates(desired, existing)
 

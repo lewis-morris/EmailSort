@@ -15,7 +15,15 @@ class CodexRunner:
         self.provider = provider  # codex | codex-oss
         self.model = model
 
-    def run_with_schema(self, prompt: str, schema_path: Path, output_path: Path) -> Dict[str, Any]:
+    def run_with_schema(
+        self, prompt: str, schema_path: Path, output_path: Path
+    ) -> Dict[str, Any]:
+        """Execute `codex exec` with a JSON schema and return the parsed output.
+
+        The prompt is piped via stdin, Codex writes the structured result to
+        `output_path` (for auditability), and this helper returns the parsed
+        JSON payload.
+        """
         schema_path = schema_path.resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -52,7 +60,9 @@ class CodexRunner:
             logger.debug("codex stderr: %s", proc.stderr[-2000:])
 
         if proc.returncode != 0:
-            raise RuntimeError(f"codex exec failed (code {proc.returncode}): {proc.stderr.strip()}")
+            raise RuntimeError(
+                f"codex exec failed (code {proc.returncode}): {proc.stderr.strip()}"
+            )
 
         # Output written to file (-o). Parse it.
         content = output_path.read_text(encoding="utf-8").strip()

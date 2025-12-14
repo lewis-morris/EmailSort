@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import os
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional
 
@@ -19,7 +20,9 @@ class AzureConfig:
     tenant_id: str
     authority_base: str = "https://login.microsoftonline.com"
     client_secret_env: str = "MS_GRAPH_CLIENT_SECRET"
-    delegated_scopes: List[str] = field(default_factory=lambda: ["Mail.ReadWrite", "Mail.Send"])
+    delegated_scopes: List[str] = field(
+        default_factory=lambda: ["Mail.ReadWrite", "Mail.Send"]
+    )
 
 
 @dataclass
@@ -28,6 +31,10 @@ class TriageConfig:
     lookback_days_incremental: int = 3
     max_messages_per_run: int = 40
     tone_profile_lookback_days: int = 120
+    # Body handling
+    body_format: str = "plaintext"  # plaintext | html
+    body_max_chars: int = 0  # 0 = unlimited
+    thread_max_messages: int = 0  # 0 = unlimited
     draft_replies: bool = False
     create_tasks: bool = False
     send_summary_email: bool = False
@@ -53,9 +60,40 @@ class TriageConfig:
 
 @dataclass
 class LLMConfig:
-    provider: str = "codex"  # codex | codex-oss
+    # Global default provider; individual models can override via ModelDefinition.
+    # triage_model / reply_model refer to keys in the models registry when present.
+    provider: str = "codex"  # codex | codex-oss | openai | openai-compatible | hf-local
     triage_model: str = "gpt-4.1-mini"
     reply_model: str = "gpt-4.1"
+
+
+@dataclass
+class ModelDefinition:
+    """Single model configuration entry.
+
+    For Codex providers, `model` is the Codex model name.
+    For OpenAI / OpenAI-compatible, `model` is the chat model name and
+    `api_key_env` / `base_url` control HTTP auth.
+    For hf-local, `model` is the Hugging Face model id.
+    """
+
+    name: str
+    provider: str = "codex"
+    model: str = ""
+
+    # OpenAI / HTTP-style providers
+    api_key_env: str = "OPENAI_API_KEY"
+    base_url: Optional[str] = None
+
+    # Codex CLI options
+    codex_bin: str = "codex"
+    codex_profile: Optional[str] = None
+    codex_config: List[str] = field(default_factory=list)
+
+    # Hugging Face local options
+    hf_device: Optional[str] = None  # e.g. "cuda", "cpu", "auto"
+    hf_dtype: Optional[str] = None  # e.g. "float16", "bfloat16"
+    hf_max_new_tokens: int = 512
 
 
 @dataclass
@@ -73,9 +111,15 @@ class TriageOverrides:
     create_tasks: Optional[bool] = None
     send_summary_email: Optional[bool] = None
     log_to_file: Optional[bool] = None
+    body_format: Optional[str] = None
+    body_max_chars: Optional[int] = None
+    thread_max_messages: Optional[int] = None
     summary_email_to: Optional[str] = None
     summary_email_from_account: Optional[str] = None
     priority_read_state: Optional[Dict[str, bool]] = None
+    body_format: Optional[str] = None
+    body_max_chars: Optional[int] = None
+    thread_max_messages: Optional[int] = None
 
 
 @dataclass
@@ -93,6 +137,7 @@ class AppConfig:
     azure: AzureConfig
     triage: TriageConfig
     llm: LLMConfig
+    models: Dict[str, ModelDefinition]
     accounts: List[AccountConfig]
     repo_root: Path
 
@@ -125,6 +170,12 @@ class AppConfig:
             base.send_summary_email = ov.send_summary_email
         if ov.log_to_file is not None:
             base.log_to_file = ov.log_to_file
+        if ov.body_format is not None:
+            base.body_format = ov.body_format
+        if ov.body_max_chars is not None:
+            base.body_max_chars = ov.body_max_chars
+        if ov.thread_max_messages is not None:
+            base.thread_max_messages = ov.thread_max_messages
         if ov.summary_email_to is not None:
             base.summary_email_to = ov.summary_email_to
         if ov.summary_email_from_account is not None:
@@ -189,29 +240,58 @@ def load_config(path: str | Path) -> AppConfig:
     azure_raw = raw.get("azure", {})
     triage_raw = raw.get("triage", {})
     llm_raw = raw.get("llm", {})
+    models_raw = raw.get("models", {})
     accounts_raw = raw.get("accounts", [])
 
     auth = AuthConfig(
         auth_mode=str(auth_raw.get("auth_mode", "application")),
-        token_cache_path=str(auth_raw.get("token_cache_path", "./data/msal_token_cache.bin")),
+        token_cache_path=str(
+            auth_raw.get("token_cache_path", "./data/msal_token_cache.bin")
+        ),
     )
 
     azure = AzureConfig(
         client_id=str(azure_raw["client_id"]),
         tenant_id=str(azure_raw.get("tenant_id", "organizations")),
-        authority_base=str(azure_raw.get("authority_base", "https://login.microsoftonline.com")),
-        client_secret_env=str(azure_raw.get("client_secret_env", "MS_GRAPH_CLIENT_SECRET")),
-        delegated_scopes=[str(s) for s in azure_raw.get("delegated_scopes", ["Mail.ReadWrite", "Mail.Send"])],
+        authority_base=str(
+            azure_raw.get("authority_base", "https://login.microsoftonline.com")
+        ),
+        client_secret_env=str(
+            azure_raw.get("client_secret_env", "MS_GRAPH_CLIENT_SECRET")
+        ),
+        delegated_scopes=[
+            str(s)
+            for s in azure_raw.get("delegated_scopes", ["Mail.ReadWrite", "Mail.Send"])
+        ],
     )
 
     triage_default_read_state = TriageConfig().priority_read_state
-    triage_read_state = {**triage_default_read_state, **_parse_priority_read_state(triage_raw.get("priority_read_state"))}
+    triage_read_state = {
+        **triage_default_read_state,
+        **_parse_priority_read_state(triage_raw.get("priority_read_state")),
+    }
 
     triage = TriageConfig(
         lookback_days_initial=int(triage_raw.get("lookback_days_initial", 60)),
         lookback_days_incremental=int(triage_raw.get("lookback_days_incremental", 3)),
         max_messages_per_run=int(triage_raw.get("max_messages_per_run", 40)),
-        tone_profile_lookback_days=int(triage_raw.get("tone_profile_lookback_days", 120)),
+        tone_profile_lookback_days=int(
+            triage_raw.get("tone_profile_lookback_days", 120)
+        ),
+        body_format=str(
+            os.getenv("TRIAGE_BODY_FORMAT", triage_raw.get("body_format", "plaintext"))
+        ),
+        body_max_chars=int(
+            os.getenv(
+                "TRIAGE_BODY_MAX_CHARS", triage_raw.get("body_max_chars", 0) or 0
+            )
+        ),
+        thread_max_messages=int(
+            os.getenv(
+                "TRIAGE_THREAD_MAX_MESSAGES",
+                triage_raw.get("thread_max_messages", 0) or 0,
+            )
+        ),
         draft_replies=bool(triage_raw.get("draft_replies", False)),
         create_tasks=bool(triage_raw.get("create_tasks", False)),
         send_summary_email=bool(triage_raw.get("send_summary_email", False)),
@@ -227,6 +307,52 @@ def load_config(path: str | Path) -> AppConfig:
         reply_model=str(llm_raw.get("reply_model", "gpt-4.1")),
     )
 
+    # Build model registry (optional in TOML; we fall back to llm.* values).
+    models: Dict[str, ModelDefinition] = {}
+    for name, m in models_raw.items():
+        # Each table under [models] becomes one ModelDefinition.
+        provider = str(m.get("provider", llm.provider or "codex"))
+        model_id = str(m.get("model", "") or "")
+        api_key_env = str(m.get("api_key_env", "OPENAI_API_KEY"))
+        base_url = m.get("base_url")
+        codex_bin = str(m.get("codex_bin", "codex"))
+        codex_profile = m.get("codex_profile")
+        codex_config = [str(s) for s in m.get("codex_config", [])]
+        hf_device = m.get("hf_device")
+        hf_dtype = m.get("hf_dtype")
+        hf_max_new_tokens = int(m.get("hf_max_new_tokens", 512))
+
+        models[name] = ModelDefinition(
+            name=name,
+            provider=provider,
+            model=model_id or name,
+            api_key_env=api_key_env,
+            base_url=base_url,
+            codex_bin=codex_bin,
+            codex_profile=codex_profile,
+            codex_config=codex_config,
+            hf_device=hf_device,
+            hf_dtype=hf_dtype,
+            hf_max_new_tokens=hf_max_new_tokens,
+        )
+
+    # Backwards compatibility: if no models are defined, or if llm.triage_model /
+    # llm.reply_model are not present as keys, synthesise definitions from llm.*
+    # so existing configs (which treat llm.* as raw model names) continue to work.
+    def _ensure_model(name: str, model_id: str) -> None:
+        if name in models:
+            return
+        models[name] = ModelDefinition(
+            name=name,
+            provider=llm.provider,
+            model=model_id,
+        )
+
+    if llm.triage_model:
+        _ensure_model(llm.triage_model, llm.triage_model)
+    if llm.reply_model:
+        _ensure_model(llm.reply_model, llm.reply_model)
+
     accounts: List[AccountConfig] = []
     for a in accounts_raw:
         email = str(a["email"])
@@ -241,7 +367,11 @@ def load_config(path: str | Path) -> AppConfig:
             tenant_id=azure_ov_raw.get("tenant_id"),
             authority_base=azure_ov_raw.get("authority_base"),
             client_secret_env=azure_ov_raw.get("client_secret_env"),
-            delegated_scopes=[str(s) for s in azure_ov_raw.get("delegated_scopes")] if azure_ov_raw.get("delegated_scopes") else None,
+            delegated_scopes=(
+                [str(s) for s in azure_ov_raw.get("delegated_scopes")]
+                if azure_ov_raw.get("delegated_scopes")
+                else None
+            ),
         )
 
         triage_ov = TriageOverrides(
@@ -249,9 +379,14 @@ def load_config(path: str | Path) -> AppConfig:
             create_tasks=triage_ov_raw.get("create_tasks"),
             send_summary_email=triage_ov_raw.get("send_summary_email"),
             log_to_file=triage_ov_raw.get("log_to_file"),
+            body_format=triage_ov_raw.get("body_format"),
+            body_max_chars=triage_ov_raw.get("body_max_chars"),
+            thread_max_messages=triage_ov_raw.get("thread_max_messages"),
             summary_email_to=triage_ov_raw.get("summary_email_to"),
             summary_email_from_account=triage_ov_raw.get("summary_email_from_account"),
-            priority_read_state=_parse_priority_read_state(triage_ov_raw.get("priority_read_state")),
+            priority_read_state=_parse_priority_read_state(
+                triage_ov_raw.get("priority_read_state")
+            ),
         )
 
         accounts.append(
@@ -264,4 +399,12 @@ def load_config(path: str | Path) -> AppConfig:
             )
         )
 
-    return AppConfig(auth=auth, azure=azure, triage=triage, llm=llm, accounts=accounts, repo_root=repo_root)
+    return AppConfig(
+        auth=auth,
+        azure=azure,
+        triage=triage,
+        llm=llm,
+        models=models,
+        accounts=accounts,
+        repo_root=repo_root,
+    )

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import html
+from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -14,9 +16,9 @@ from .auth import (
     build_public_client,
     record_login_event,
 )
-from .codex_runner import CodexRunner
 from .config import AppConfig, AccountConfig
 from .graph_client import GraphClient
+from .model_client import StructuredLLMRunner
 from .utils import account_state_dir, load_json, save_json, utc_now, run_ledger_dir
 
 logger = logging.getLogger("email_categorise.logic")
@@ -34,6 +36,11 @@ CATEGORY_HELP = """Categories (exact strings):
 - Complete
 - Possibly Complete
 - Processed (added by the tool)
+- Payment Request
+- Invoice
+- Order Confirmation
+- Issue
+- Task
 """
 
 # Colour palette for Outlook master categories.
@@ -51,6 +58,11 @@ CATEGORY_COLORS = {
     "Complete": "preset19",  # dark green
     "Possibly Complete": "preset18",  # dark yellow
     "Processed": "preset13",  # dark gray
+    "Payment Request": "preset14",  # purple-ish
+    "Invoice": "preset9",  # violet
+    "Order Confirmation": "preset6",  # turquoise
+    "Issue": "preset2",  # amber/red
+    "Task": "preset8",  # blue-green
 }
 
 
@@ -71,7 +83,44 @@ def _trim(text: Optional[str], max_len: int = 2000) -> str:
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
 
-def _has_user_replied(thread_messages: List[Dict[str, Any]], account_email: str) -> bool:
+def _html_to_text(raw_html: str) -> str:
+    """Lightweight HTML -> plaintext converter (strip tags, unescape entities)."""
+    if not raw_html:
+        return ""
+
+    class _Stripper(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts: List[str] = []
+
+        def handle_data(self, data: str) -> None:
+            self.parts.append(data)
+
+        def get_text(self) -> str:
+            return "".join(self.parts)
+
+    stripper = _Stripper()
+    try:
+        stripper.feed(raw_html)
+    except Exception:
+        # Fall back to best-effort unescaped text
+        return html.unescape(raw_html)
+    return html.unescape(stripper.get_text())
+
+
+def _prepare_body(body_html: str, triage_cfg) -> str:
+    """Convert and optionally truncate message body according to config."""
+    content = body_html or ""
+    if triage_cfg.body_format.lower() != "html":
+        content = _html_to_text(content)
+    if triage_cfg.body_max_chars and triage_cfg.body_max_chars > 0:
+        content = content[: triage_cfg.body_max_chars]
+    return content
+
+
+def _has_user_replied(
+    thread_messages: List[Dict[str, Any]], account_email: str
+) -> bool:
     addr_lower = account_email.lower()
     for m in thread_messages:
         from_data = (m.get("from") or {}).get("emailAddress") or {}
@@ -80,7 +129,9 @@ def _has_user_replied(thread_messages: List[Dict[str, Any]], account_email: str)
     return False
 
 
-def _last_message_from_me(thread_messages: List[Dict[str, Any]], account_email: str) -> bool:
+def _last_message_from_me(
+    thread_messages: List[Dict[str, Any]], account_email: str
+) -> bool:
     if not thread_messages:
         return False
     addr_lower = account_email.lower()
@@ -89,7 +140,9 @@ def _last_message_from_me(thread_messages: List[Dict[str, Any]], account_email: 
     return (from_data.get("address") or "").lower() == addr_lower
 
 
-def _simplify_thread(thread_messages: List[Dict[str, Any]], account_email: str) -> List[Dict[str, Any]]:
+def _simplify_thread(
+    thread_messages: List[Dict[str, Any]], account_email: str
+) -> List[Dict[str, Any]]:
     addr_lower = account_email.lower()
     tail = thread_messages[-8:]
     simplified: List[Dict[str, Any]] = []
@@ -109,7 +162,9 @@ def _simplify_thread(thread_messages: List[Dict[str, Any]], account_email: str) 
     return simplified
 
 
-def _tone_profile_for_sender(tone_profiles: Dict[str, Any], sender_address: str) -> Dict[str, Any]:
+def _tone_profile_for_sender(
+    tone_profiles: Dict[str, Any], sender_address: str
+) -> Dict[str, Any]:
     contacts = tone_profiles.get("contacts", {})
     default_profile = tone_profiles.get("default", {})
     return contacts.get(sender_address.lower(), default_profile)
@@ -127,6 +182,11 @@ def _calculate_importance(primary_category: str) -> str:
 
 
 def _build_followup_flag(flag_name: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Map a human-friendly flag name to the Graph followupFlag structure.
+
+    Returns None for unknown flags, and uses UTC-aware start/due dates with
+    sensible daytime hours for relative choices like Today/Tomorrow.
+    """
     if not flag_name:
         return None
     name = flag_name.strip().lower()
@@ -147,7 +207,9 @@ def _build_followup_flag(flag_name: Optional[str]) -> Optional[Dict[str, Any]]:
             days_ahead += 7
         target = now + timedelta(days=days_ahead)
         start = now
-        due = datetime(target.year, target.month, target.day, 18, 0, 0, tzinfo=timezone.utc)
+        due = datetime(
+            target.year, target.month, target.day, 18, 0, 0, tzinfo=timezone.utc
+        )
     elif name == "next week":
         days_until_monday = (7 - now.weekday()) % 7
         if days_until_monday == 0:
@@ -155,13 +217,29 @@ def _build_followup_flag(flag_name: Optional[str]) -> Optional[Dict[str, Any]]:
         monday_next = now + timedelta(days=days_until_monday)
         friday_next = monday_next + timedelta(days=4)
         start = monday_next
-        due = datetime(friday_next.year, friday_next.month, friday_next.day, 18, 0, 0, tzinfo=timezone.utc)
+        due = datetime(
+            friday_next.year,
+            friday_next.month,
+            friday_next.day,
+            18,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
     elif name == "no date":
-        return {"flagStatus": "flagged", "startDateTime": None, "dueDateTime": None, "completedDateTime": None}
+        return {
+            "flagStatus": "flagged",
+            "startDateTime": None,
+            "dueDateTime": None,
+            "completedDateTime": None,
+        }
     elif name == "mark as complete":
         return {
             "flagStatus": "complete",
-            "completedDateTime": {"dateTime": utc_now().replace(microsecond=0).isoformat(), "timeZone": "UTC"},
+            "completedDateTime": {
+                "dateTime": utc_now().replace(microsecond=0).isoformat(),
+                "timeZone": "UTC",
+            },
             "startDateTime": None,
             "dueDateTime": None,
         }
@@ -170,8 +248,14 @@ def _build_followup_flag(flag_name: Optional[str]) -> Optional[Dict[str, Any]]:
 
     return {
         "flagStatus": "flagged",
-        "startDateTime": {"dateTime": start.replace(microsecond=0).isoformat(), "timeZone": "UTC"},
-        "dueDateTime": {"dateTime": due.replace(microsecond=0).isoformat(), "timeZone": "UTC"},
+        "startDateTime": {
+            "dateTime": start.replace(microsecond=0).isoformat(),
+            "timeZone": "UTC",
+        },
+        "dueDateTime": {
+            "dateTime": due.replace(microsecond=0).isoformat(),
+            "timeZone": "UTC",
+        },
         "completedDateTime": None,
     }
 
@@ -233,7 +317,22 @@ def _apply_triage_to_message(
     create_tasks: bool,
     priority_read_state: Dict[str, bool],
     graph: GraphClient,
-) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
+) -> Tuple[
+    Dict[str, Any],
+    Optional[Dict[str, Any]],
+    Optional[Dict[str, Any]],
+    Optional[str],
+    Dict[str, Any],
+]:
+    """Turn a single triage decision into Graph patch payloads and side outputs.
+
+    Returns:
+      patch_body: fields to update on the message
+      info_entry: optional informational summary row
+      task_entry: optional task entry
+      draft_id: id of any created draft reply
+      before_state: snapshot for rollback ledger
+    """
     existing_categories: List[str] = list(original.get("categories") or [])
     categories = set(existing_categories)
     categories.add("Processed")
@@ -268,7 +367,10 @@ def _apply_triage_to_message(
             return priority_read_state[primary_category]
         if mark_complete and "Complete" in priority_read_state:
             return priority_read_state["Complete"]
-        if triage.get("mark_possibly_complete") and "Possibly Complete" in priority_read_state:
+        if (
+            triage.get("mark_possibly_complete")
+            and "Possibly Complete" in priority_read_state
+        ):
             return priority_read_state["Possibly Complete"]
         if is_marketing and "Marketing" in priority_read_state:
             return priority_read_state["Marketing"]
@@ -308,7 +410,9 @@ def _apply_triage_to_message(
 
     draft_id: Optional[str] = None
     if draft_replies and needs_reply and triage.get("draft_reply_body"):
-        html = "<p>" + "<br>".join(str(triage["draft_reply_body"]).splitlines()) + "</p>"
+        html = (
+            "<p>" + "<br>".join(str(triage["draft_reply_body"]).splitlines()) + "</p>"
+        )
         draft_id = graph.create_draft_reply(original["id"], html)
 
     before_state = {
@@ -337,7 +441,11 @@ def _write_tasks_file(account_dir: Path, tasks: List[Dict[str, Any]]) -> Path:
     return path
 
 
-def _write_log_file(account_dir: Path, messages: List[Dict[str, Any]], triage_map: Dict[str, Dict[str, Any]]) -> None:
+def _write_log_file(
+    account_dir: Path,
+    messages: List[Dict[str, Any]],
+    triage_map: Dict[str, Dict[str, Any]],
+) -> None:
     path = account_dir / "triage-log.txt"
     with path.open("a", encoding="utf-8") as f:
         f.write(f"\n=== Triage run at {utc_now().isoformat()} ===\n")
@@ -361,7 +469,10 @@ def _summary_email_html(infos: List[Dict[str, Any]], account_email: str) -> str:
     return f"<p>Informational email summary for <strong>{account_email}</strong>.</p><ul>{''.join(rows)}</ul>"
 
 
-def _get_graph(config: AppConfig, account: AccountConfig, run_id: Optional[str] = None) -> GraphClient:
+def _get_graph(
+    config: AppConfig, account: AccountConfig, run_id: Optional[str] = None
+) -> GraphClient:
+    """Construct an authenticated GraphClient respecting auth mode and account overrides."""
     azure = config.azure_for_account(account)
     tenant_id = azure.tenant_id
     cache_path = Path(config.auth.token_cache_path)
@@ -370,7 +481,9 @@ def _get_graph(config: AppConfig, account: AccountConfig, run_id: Optional[str] 
         token = acquire_delegated_token(app, azure.delegated_scopes, account.email)
         if not token:
             raise RuntimeError(f"Delegated auth failed for {account.email}")
-        record_login_event(config.repo_root, account.email, "delegated", tenant_id, run_id)
+        record_login_event(
+            config.repo_root, account.email, "delegated", tenant_id, run_id
+        )
         return GraphClient(token["access_token"], user="me")
     if config.auth.auth_mode == "application":
         app = build_confidential_client(azure, cache_path, tenant_id=tenant_id)
@@ -378,7 +491,9 @@ def _get_graph(config: AppConfig, account: AccountConfig, run_id: Optional[str] 
         if not token:
             raise RuntimeError("Application auth failed")
         # app-only tokens cannot use /me, use /users/{upn}
-        record_login_event(config.repo_root, account.email, "application", tenant_id, run_id)
+        record_login_event(
+            config.repo_root, account.email, "application", tenant_id, run_id
+        )
         return GraphClient(token["access_token"], user=account.email)
     raise RuntimeError(f"Unknown auth_mode: {config.auth.auth_mode}")
 
@@ -387,14 +502,21 @@ def _safe_account_name(email: str) -> str:
     return email.replace("@", "_at_").replace("/", "_")
 
 
-def _ledger_paths(repo_root: Path, run_id: str, account_email: str) -> tuple[Path, Path]:
+def _ledger_paths(
+    repo_root: Path, run_id: str, account_email: str
+) -> tuple[Path, Path]:
     ledger_dir = run_ledger_dir(repo_root / "ledger")
     ledger_path = ledger_dir / f"{_safe_account_name(account_email)}_{run_id}.json"
     index_path = ledger_dir / "index.json"
     return ledger_path, index_path
 
 
-def _write_ledger(repo_root: Path, account_email: str, actions: List[Dict[str, Any]], run_id: Optional[str] = None) -> str:
+def _write_ledger(
+    repo_root: Path,
+    account_email: str,
+    actions: List[Dict[str, Any]],
+    run_id: Optional[str] = None,
+) -> str:
     run_id = run_id or uuid.uuid4().hex[:12]
     ledger_path, index_path = _ledger_paths(repo_root, run_id, account_email)
     entry = {
@@ -413,14 +535,18 @@ def _write_ledger(repo_root: Path, account_email: str, actions: List[Dict[str, A
     return run_id
 
 
-def _load_ledger(repo_root: Path, account_email: str, run_id: str) -> Optional[Dict[str, Any]]:
+def _load_ledger(
+    repo_root: Path, account_email: str, run_id: str
+) -> Optional[Dict[str, Any]]:
     ledger_path, _ = _ledger_paths(repo_root, run_id, account_email)
     if not ledger_path.exists():
         return None
     return load_json(ledger_path, None)
 
 
-def rollback_run(config: AppConfig, accounts: List[AccountConfig], run_id: str) -> Dict[str, Any]:
+def rollback_run(
+    config: AppConfig, accounts: List[AccountConfig], run_id: str
+) -> Dict[str, Any]:
     """
     Best-effort rollback: revert message patches to previous categories/read/flag and
     delete drafts created during the run.
@@ -468,13 +594,27 @@ def rollback_run(config: AppConfig, accounts: List[AccountConfig], run_id: str) 
                             with path.open("r+b") as f:
                                 f.truncate(prev_size)
                     except Exception as exc:
-                        logger.warning("Failed to rollback tasks file %s: %s", path, exc)
+                        logger.warning(
+                            "Failed to rollback tasks file %s: %s", path, exc
+                        )
 
-        results["accounts"].append({"account": account.email, "restored": restored, "drafts_deleted": drafts_deleted})
+        results["accounts"].append(
+            {
+                "account": account.email,
+                "restored": restored,
+                "drafts_deleted": drafts_deleted,
+            }
+        )
     return results
 
 
-def send_failure_notification(config: AppConfig, accounts: List[AccountConfig], subject: str, body_html: str, run_id: Optional[str] = None) -> bool:
+def send_failure_notification(
+    config: AppConfig,
+    accounts: List[AccountConfig],
+    subject: str,
+    body_html: str,
+    run_id: Optional[str] = None,
+) -> bool:
     """
     Send a failure notification email using the first available account.
     """
@@ -492,13 +632,20 @@ def send_failure_notification(config: AppConfig, accounts: List[AccountConfig], 
         return False
 
 
-def init_account(config: AppConfig, account: AccountConfig, runner_reply: CodexRunner, run_id: Optional[str] = None) -> Dict[str, Any]:
+def init_account(
+    config: AppConfig,
+    account: AccountConfig,
+    runner_reply: StructuredLLMRunner,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
     state_root = account_state_dir(Path("./data"), account.email)
 
     triage_cfg = config.triage_for_account(account)
     graph = _get_graph(config, account, run_id=run_id)
 
-    inbox = graph.list_inbox_messages_since(triage_cfg.lookback_days_initial, max_messages=1000)
+    inbox = graph.list_inbox_messages_since(
+        triage_cfg.lookback_days_initial, max_messages=1000
+    )
     domain = account.email.split("@")[-1].lower()
     sender_stats: Dict[str, Any] = {}
     for msg in inbox:
@@ -506,13 +653,21 @@ def init_account(config: AppConfig, account: AccountConfig, runner_reply: CodexR
         addr = (fd.get("address") or "").lower()
         if not addr:
             continue
-        entry = sender_stats.get(addr) or {"address": addr, "display_name": fd.get("name"), "count": 0, "internal": addr.endswith("@"+domain), "latest_received": msg.get("receivedDateTime")}
+        entry = sender_stats.get(addr) or {
+            "address": addr,
+            "display_name": fd.get("name"),
+            "count": 0,
+            "internal": addr.endswith("@" + domain),
+            "latest_received": msg.get("receivedDateTime"),
+        }
         entry["count"] += 1
         sender_stats[addr] = entry
     save_json(state_root / "sender_stats.json", sender_stats)
 
     # tone profiles from sent items
-    sent = graph.list_sent_messages_since(triage_cfg.tone_profile_lookback_days, max_messages=800)
+    sent = graph.list_sent_messages_since(
+        triage_cfg.tone_profile_lookback_days, max_messages=800
+    )
     account_addr = account.email.lower()
     recip_map: Dict[str, List[Dict[str, Any]]] = {}
     for m in sent:
@@ -532,11 +687,17 @@ def init_account(config: AppConfig, account: AccountConfig, runner_reply: CodexR
         parts = []
         for i, m in enumerate(msgs[:n], start=1):
             body = (m.get("body") or {}).get("content") or m.get("bodyPreview") or ""
-            parts.append(f"[EMAIL {i}]\nSubject: {m.get('subject')}\n\n{_trim(body, 1200)}")
+            parts.append(
+                f"[EMAIL {i}]\nSubject: {m.get('subject')}\n\n{_trim(body, 1200)}"
+            )
         return "\n\n".join(parts)
 
     for addr, msgs in top:
-        prompt = _tone_prompt() + "\n\n" + f"Contact email: {addr}\n\nExamples:\n{samples(msgs)}"
+        prompt = (
+            _tone_prompt()
+            + "\n\n"
+            + f"Contact email: {addr}\n\nExamples:\n{samples(msgs)}"
+        )
         out_path = state_root / f"tone_{addr.replace('@','_at_')}.json"
         try:
             res = runner_reply.run_with_schema(prompt, schema, out_path)
@@ -556,22 +717,30 @@ def init_account(config: AppConfig, account: AccountConfig, runner_reply: CodexR
 
     save_json(state_root / "tone_profiles.json", tone_profiles)
 
-    state = load_json(state_root / "state.json", {"first_run_completed": False, "last_run_utc": None})
+    state = load_json(
+        state_root / "state.json", {"first_run_completed": False, "last_run_utc": None}
+    )
     state["first_run_completed"] = True
     save_json(state_root / "state.json", state)
 
-    return {"account": account.email, "sender_stats": len(sender_stats), "tone_contacts": len(tone_profiles["contacts"])}
+    return {
+        "account": account.email,
+        "sender_stats": len(sender_stats),
+        "tone_contacts": len(tone_profiles["contacts"]),
+    }
 
 
 def run_for_account(
     config: AppConfig,
     account: AccountConfig,
-    runner_triage: CodexRunner,
-    runner_reply: CodexRunner,
+    runner_triage: StructuredLLMRunner,
+    runner_reply: StructuredLLMRunner,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     state_root = account_state_dir(Path("./data"), account.email)
-    state = load_json(state_root / "state.json", {"first_run_completed": False, "last_run_utc": None})
+    state = load_json(
+        state_root / "state.json", {"first_run_completed": False, "last_run_utc": None}
+    )
 
     triage_cfg = config.triage_for_account(account)
     graph = _get_graph(config, account, run_id=run_id)
@@ -582,44 +751,72 @@ def run_for_account(
 
     if not state.get("first_run_completed"):
         init_account(config, account, runner_reply, run_id=run_id)
-        state = load_json(state_root / "state.json", {"first_run_completed": True, "last_run_utc": None})
+        state = load_json(
+            state_root / "state.json",
+            {"first_run_completed": True, "last_run_utc": None},
+        )
 
-    days_back = triage_cfg.lookback_days_incremental if state.get("last_run_utc") else triage_cfg.lookback_days_initial
-    msgs = graph.list_inbox_unprocessed_messages(days_back, max_messages=triage_cfg.max_messages_per_run)
+    days_back = (
+        triage_cfg.lookback_days_incremental
+        if state.get("last_run_utc")
+        else triage_cfg.lookback_days_initial
+    )
+    msgs = graph.list_inbox_unprocessed_messages(
+        days_back, max_messages=triage_cfg.max_messages_per_run
+    )
     if not msgs:
         state["last_run_utc"] = utc_now().isoformat()
         save_json(state_root / "state.json", state)
         return {"account": account.email, "processed": 0}
 
     sender_stats = load_json(state_root / "sender_stats.json", {})
-    tone_profiles = load_json(state_root / "tone_profiles.json", {"contacts": {}, "default": {}})
+    tone_profiles = load_json(
+        state_root / "tone_profiles.json", {"contacts": {}, "default": {}}
+    )
 
     payload_msgs = []
+    thread_limit = (
+        triage_cfg.thread_max_messages if triage_cfg.thread_max_messages > 0 else 1000
+    )
     for m in msgs:
         fd = (m.get("from") or {}).get("emailAddress") or {}
         sender_addr = (fd.get("address") or "").lower()
         conv = m.get("conversationId")
-        thread = graph.list_conversation_messages(conv, max_messages=10) if conv else []
-        payload_msgs.append({
-            "id": m["id"],
-            "subject": m.get("subject"),
-            "from": {"address": sender_addr, "name": fd.get("name")},
-            "receivedDateTime": m.get("receivedDateTime"),
-            "categories": m.get("categories", []),
-            "importance": m.get("importance"),
-            "webLink": m.get("webLink"),
-            "uniqueBodyHtml": (m.get("uniqueBody") or {}).get("content"),
-            "thread_summary": _simplify_thread(thread, account.email),
-            "has_user_replied_in_thread": _has_user_replied(thread, account.email),
-            "last_message_from_me_in_thread": _last_message_from_me(thread, account.email),
-            "sender_stats": sender_stats.get(sender_addr, {}),
-            "tone_profile": _tone_profile_for_sender(tone_profiles, sender_addr),
-        })
+        thread = (
+            graph.list_conversation_messages(conv, max_messages=thread_limit)
+            if conv
+            else []
+        )
+        body_html = (m.get("uniqueBody") or {}).get("content") or ""
+        body = _prepare_body(body_html, triage_cfg)
+        payload_msgs.append(
+            {
+                "id": m["id"],
+                "subject": m.get("subject"),
+                "from": {"address": sender_addr, "name": fd.get("name")},
+                "receivedDateTime": m.get("receivedDateTime"),
+                "categories": m.get("categories", []),
+                "importance": m.get("importance"),
+                "webLink": m.get("webLink"),
+                "body": body,
+                "thread_summary": _simplify_thread(thread, account.email),
+                "has_user_replied_in_thread": _has_user_replied(thread, account.email),
+                "last_message_from_me_in_thread": _last_message_from_me(
+                    thread, account.email
+                ),
+                "sender_stats": sender_stats.get(sender_addr, {}),
+                "tone_profile": _tone_profile_for_sender(tone_profiles, sender_addr),
+            }
+        )
 
     schema = Path(__file__).parent / "json_schemas" / "triage_output.schema.json"
     out_path = state_root / f"triage_{utc_now().strftime('%Y%m%d-%H%M%S')}.json"
 
-    prompt = _triage_prompt() + "\n\nINPUT JSON:\n" + json.dumps({"messages": payload_msgs}, indent=2)
+    prompt = (
+        _triage_prompt()
+        + "\n\nINPUT JSON:\n"
+        + json.dumps({"messages": payload_msgs}, indent=2)
+    )
     triage_res = runner_triage.run_with_schema(prompt, schema, out_path)
     results = triage_res.get("messages") or []
     triage_map = {r["id"]: r for r in results if "id" in r}
@@ -655,7 +852,9 @@ def run_for_account(
             tasks.append(task)
         if draft_id:
             drafts += 1
-            ledger_actions.append({"type": "draft_created", "draft_id": draft_id, "message_id": m["id"]})
+            ledger_actions.append(
+                {"type": "draft_created", "draft_id": draft_id, "message_id": m["id"]}
+            )
 
     if triage_cfg.create_tasks and tasks:
         tasks_path = state_root / "tasks.md"
@@ -678,14 +877,27 @@ def run_for_account(
         # Send summary from the mailbox specified in config (must be configured)
         # If this run is not for that mailbox, we still send from that mailbox by creating a second GraphClient.
         from_acc = triage_cfg.summary_email_from_account or account.email
-        from_account_obj = next((a for a in config.accounts if a.email.lower() == from_acc.lower()), None)
+        from_account_obj = next(
+            (a for a in config.accounts if a.email.lower() == from_acc.lower()), None
+        )
         if from_account_obj:
             graph_sender = _get_graph(config, from_account_obj, run_id=run_id)
             html = _summary_email_html(infos, account.email)
-            graph_sender.send_mail(subject=f"Informational email summary for {account.label}", html_body=html, to_address=triage_cfg.summary_email_to)
+            graph_sender.send_mail(
+                subject=f"Informational email summary for {account.label}",
+                html_body=html,
+                to_address=triage_cfg.summary_email_to,
+            )
             summary_sent = True
 
     state["last_run_utc"] = utc_now().isoformat()
     save_json(state_root / "state.json", state)
 
-    return {"account": account.email, "processed": len(msgs), "drafts": drafts, "tasks": len(tasks), "informational": len(infos), "summary_sent": summary_sent}
+    return {
+        "account": account.email,
+        "processed": len(msgs),
+        "drafts": drafts,
+        "tasks": len(tasks),
+        "informational": len(infos),
+        "summary_sent": summary_sent,
+    }

@@ -18,6 +18,11 @@ Use these categories exactly as spelled:
 - **Complete** - conversation and work are clearly finished.
 - **Possibly Complete** - seems finished but uncertain; user should review.
 - **Processed** - synthetic tag added by the tool to avoid reprocessing.
+- **Payment Request** - sender is asking for payment to be made.
+- **Invoice** - an invoice is provided for records/payment.
+- **Order Confirmation** - confirmation of an order we placed.
+- **Issue** - a problem is reported that needs attention.
+- **Task** - someone is asking for a task to be completed.
 
 ## Flags
 

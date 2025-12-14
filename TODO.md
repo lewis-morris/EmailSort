@@ -22,4 +22,20 @@
 
 - [x] Update `README.md` (and `README_email_categorise.md` if needed) to document the new structure (config, scripts, login directories), setup workflow, config keys (auth per account, priority read/unread rules, default actions), usage examples with the new scripts, rollback procedure, and weekly test guard.
 
-- [ ] Consider adding minimal smoke tests (pytest) or validation commands covering new flag parsing, config loading from `config/`, rollback ledger integrity, and weekly test guard behaviour.
+- [x] Introduce a proper model registry and `ModelDefinition` type in `config.py`, wiring a `[models]` section in `config.toml` so `llm.triage_model` / `llm.reply_model` map to named model definitions instead of raw Codex model strings.
+
+- [x] Unify LLM access behind a single client abstraction (e.g. `ModelClient.chat_json(...)`) and stop calling `CodexRunner` directly from `triage_logic` and `cli`; provide a Codex-backed implementation that preserves current behaviour.
+
+- [x] Add a new Hugging Face local provider (e.g. `provider = "hf-local"`) in `ModelClient`, including config knobs for model id, device, dtype, max tokens, etc., so local HF models can be used for triage, tone profiling, and reply drafting.
+
+- [x] Optionally support OpenAI-compatible HTTP endpoints in config (e.g. local vLLM / TGI / LM Studio / Ollama servers) by treating them as `provider = "openai-compatible"` with a configurable `base_url`.
+
+- [x] Make JSON Schema validation provider-agnostic: call the selected model through the shared LLM interface, validate responses against the existing schemas in `email_categorise/json_schemas`, and write the validated outputs to disk for auditability (mirroring current Codex behaviour).
+
+- [x] Update `triage_logic` and `cli` so triage and drafting are provider-agnostic, selecting Codex vs Hugging Face vs OpenAI-compatible purely from config without further Python changes.
+
+- [x] Document recommended open-source models for triage/tone profiling vs reply drafting in `config/config.example.toml` and/or `README_email_categorise.md` (for example: Phi-3.5-mini, Qwen2.5-3B/Qwen2.5-7B, Mistral-7B, Llama-3.1-8B).
+
+- [x] Add tooling to export a fine-tune dataset from Sent Items without affecting the main triage flow.
+
+- [ ] Train and register a fine-tuned local reply model in the user's tone, then wire it into config as an optional `[models.reply_finetuned]` entry.

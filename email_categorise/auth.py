@@ -28,7 +28,13 @@ def _authority(azure: AzureConfig, tenant_id: str) -> str:
     return f"{base}/{tenant_id}"
 
 
-def record_login_event(repo_root: Path, account_email: str, auth_mode: str, tenant_id: str, run_id: Optional[str]) -> Path:
+def record_login_event(
+    repo_root: Path,
+    account_email: str,
+    auth_mode: str,
+    tenant_id: str,
+    run_id: Optional[str],
+) -> Path:
     """
     Persist non-sensitive auth/session metadata for audit/rollback awareness.
     Tokens remain only in MSAL cache.
@@ -52,7 +58,9 @@ def record_login_event(repo_root: Path, account_email: str, auth_mode: str, tena
     return path
 
 
-def build_public_client(azure: AzureConfig, cache_path: Path, tenant_id: str) -> msal.PublicClientApplication:
+def build_public_client(
+    azure: AzureConfig, cache_path: Path, tenant_id: str
+) -> msal.PublicClientApplication:
     cache_path = cache_path.expanduser()
     ensure_dir(cache_path.parent)
     cache = _build_cache(cache_path)
@@ -63,7 +71,9 @@ def build_public_client(azure: AzureConfig, cache_path: Path, tenant_id: str) ->
     )
 
 
-def build_confidential_client(azure: AzureConfig, cache_path: Path, tenant_id: str) -> msal.ConfidentialClientApplication:
+def build_confidential_client(
+    azure: AzureConfig, cache_path: Path, tenant_id: str
+) -> msal.ConfidentialClientApplication:
     cache_path = cache_path.expanduser()
     ensure_dir(cache_path.parent)
     cache = _build_cache(cache_path)
@@ -101,7 +111,9 @@ def acquire_delegated_token(
         result = app.acquire_token_silent(list(scopes_clean), account=accounts[0])
 
     if not result:
-        logger.info("No suitable cached token for %s, launching interactive login...", username)
+        logger.info(
+            "No suitable cached token for %s, launching interactive login...", username
+        )
         result = app.acquire_token_interactive(
             scopes=list(scopes_clean),
             login_hint=username,
@@ -109,7 +121,11 @@ def acquire_delegated_token(
         )
 
     if not result or "access_token" not in result:
-        logger.error("Failed to acquire delegated token for %s: %s", username, (result or {}).get("error_description"))
+        logger.error(
+            "Failed to acquire delegated token for %s: %s",
+            username,
+            (result or {}).get("error_description"),
+        )
         return None
     return result
 
@@ -118,8 +134,13 @@ def acquire_application_token(
     app: msal.ConfidentialClientApplication,
 ) -> dict | None:
     # Uses the Graph .default scope set, representing app permissions granted in the portal.
-    result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+    result = app.acquire_token_for_client(
+        scopes=["https://graph.microsoft.com/.default"]
+    )
     if not result or "access_token" not in result:
-        logger.error("Failed to acquire application token: %s", (result or {}).get("error_description"))
+        logger.error(
+            "Failed to acquire application token: %s",
+            (result or {}).get("error_description"),
+        )
         return None
     return result

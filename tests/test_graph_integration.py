@@ -35,7 +35,9 @@ def app_config():
     load_env_file(repo_root / ".env")
     cfg_path = repo_root / "config" / "config.toml"
     if not cfg_path.exists():
-        pytest.skip("config/config.toml missing; create from config/config.example.toml with primary account settings")
+        pytest.skip(
+            "config/config.toml missing; create from config/config.example.toml with primary account settings"
+        )
     return load_config(cfg_path)
 
 
@@ -52,7 +54,9 @@ def graph(app_config, primary_account):
         pytest.skip("Integration tests expect application auth for unattended runs")
 
     if not os.environ.get(app_config.azure.client_secret_env):
-        pytest.skip(f"Missing client secret env var {app_config.azure.client_secret_env}")
+        pytest.skip(
+            f"Missing client secret env var {app_config.azure.client_secret_env}"
+        )
 
     cache_path = Path(app_config.auth.token_cache_path)
     if not cache_path.is_absolute():
@@ -65,7 +69,9 @@ def graph(app_config, primary_account):
     )
     token = auth.acquire_application_token(client)
     if not token:
-        pytest.skip("Unable to acquire application token (check client secret/env and app permissions)")
+        pytest.skip(
+            "Unable to acquire application token (check client secret/env and app permissions)"
+        )
     access_token = token["access_token"]
     return GraphClient(access_token=access_token, user=primary_account.email)
 
@@ -106,7 +112,9 @@ def test_tags_message_processed_and_flag_today(graph: GraphClient, self_message:
     new_categories.update({"Processed", "IntegrationTest"})
     flag_obj = _build_followup_flag("Today")
 
-    graph.update_message(self_message["id"], {"categories": sorted(new_categories), "flag": flag_obj})
+    graph.update_message(
+        self_message["id"], {"categories": sorted(new_categories), "flag": flag_obj}
+    )
 
     refreshed = graph._get(f"{graph._user_root}/messages/{self_message['id']}")
     assert "Processed" in refreshed.get("categories", [])

@@ -46,6 +46,14 @@ lookback_days_initial = 60
 lookback_days_incremental = 3
 max_messages_per_run = 40
 
+# Body handling (LLM prompt)
+# plaintext | html
+body_format = "plaintext"
+# 0 = unlimited characters; otherwise truncate message body before sending to LLM
+body_max_chars = 0
+# Limit messages per thread when building context (0 = unlimited)
+thread_max_messages = 0
+
 # Tone profiling: Sent Items lookback for building tone profiles
 tone_profile_lookback_days = 120
 
@@ -61,6 +69,23 @@ summary_email_to = "lewis@colemanbros.co.uk"
 # Which account should send summaries (must be in [[accounts]])
 summary_email_from_account = "lewis@colemanbros.co.uk"
 
+# Per-priority read/unread handling (true = mark read after processing; false = leave unread)
+[triage.priority_read_state]
+default = false
+"Urgent" = false
+"Priority 1" = false
+"Priority 2" = false
+"Priority 3" = false
+"Marketing" = true
+"Informational" = false
+"Complete" = true
+"Possibly Complete" = true
+"Payment Request" = false
+"Invoice" = false
+"Order Confirmation" = false
+"Issue" = false
+"Task" = false
+
 [llm]
 # LLM provider for triage + tone profiling + drafting.
 #
@@ -69,27 +94,18 @@ summary_email_from_account = "lewis@colemanbros.co.uk"
 # - "codex-oss": use Codex CLI with --oss (routes to local provider, requires Ollama).
 provider = "codex"
 
-# Recommended defaults:
-# - Fast & good: gpt-4.1-mini
-# - Stronger replies: gpt-4.1 or gpt-5.1-chat-latest
-#
-# The model list you pasted includes many options.
-# For this project, prefer chat/reasoning models (gpt-4.1*, gpt-5.* chat).
-# Avoid codex models for email tone, unless you are doing code tasks.
-# triage_model = "gpt-4.1-mini"
-# reply_model = "gpt-4.1"
+# Codex-only models (work with ChatGPT credits + codex exec)
+# Balanced cost/speed: mini for triage, max for replies.
+triage_model = "gpt-5.1-codex-mini"
+reply_model  = "gpt-5.1-codex-max"
 
-# Faster/cheaper triage (less accurate):
-# triage_model = "gpt-4.1-nano"
-# reply_model  = "gpt-4.1-mini"
+# Cheaper/faster (lowest cost, lowest quality):
+# triage_model = "gpt-5.1-codex-mini"
+# reply_model  = "gpt-5.1-codex-mini"
 
-# Stronger but slower/costlier:
-triage_model = "gpt-4.1"
-reply_model  = "gpt-5.1-chat-latest"
-#
-# Or:
-# triage_model = "gpt-5.2-chat-latest"
-# reply_model  = "gpt-5.2-chat-latest"
+# More accurate (slower/costlier):
+# triage_model = "gpt-5.1-codex-max"
+# reply_model  = "gpt-5.1-codex-max"
 
 # If provider="codex-oss", you can use local models via Ollama.
 # Example:

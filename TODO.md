@@ -38,4 +38,4 @@
 
 - [x] Add tooling to export a fine-tune dataset from Sent Items without affecting the main triage flow.
 
-- [ ] Train and register a fine-tuned local reply model in the user's tone, then wire it into config as an optional `[models.reply_finetuned]` entry.
+- [x] Train and register a fine-tuned local reply model in the user's tone, then wire it into config as an optional `[models.reply_finetuned]` entry.
